@@ -9,12 +9,14 @@ import torch.utils.tensorboard as tb
 
 from .models import  MLPPlanner, TransformerPlanner, CNNPlanner, load_model, save_model
 from .datasets.road_dataset import load_data
+from .utils import load_train_data, load_val_data
 
 
 def train(
     exp_dir: str = "logs",
     model_name: str = "linear_planner",
     transformer_pipeline="state_only",
+    num_workers: int = 2,
     num_epoch: int = 50,
     lr: float = 1e-3,
     batch_size: int = 64,
@@ -37,13 +39,15 @@ def train(
     log_dir = Path(exp_dir) / f"{model_name}_{datetime.now().strftime('%m%d_%H%M%S')}"
     logger = tb.SummaryWriter(log_dir)
 
+
     # note: the grader uses default kwargs, you'll have to bake them in for the final submission
     model = load_model(model_name, **kwargs)
     model = model.to(device)
     model.train()
 
-    train_data = load_data("drive_data/train", shuffle=True, batch_size=batch_size, num_workers=2)
+    train_data = load_data("drive_data/train", transform_pipeline=transformer_pipeline, shuffle=True, batch_size=batch_size, num_workers=2)
     val_data = load_data("drive_data/val", shuffle=False)
+
 
     # create loss function and optimizer
     # optimizer = ...
@@ -58,14 +62,12 @@ def train(
             metrics[key].clear()
 
         model.train()
-
-        for img, label in train_data:
+        for batch_idx, (img, label) in enumerate(train_data):  
             img, label = img.to(device), label.to(device)
-
-            # TODO: implement training step
-            pred = model(img)
-            loss = torch.nn.functional.cross_entropy(pred, label)
             optimizer.zero_grad()
+            pred = model(img)
+            optimizer.zero_grad()
+            loss = torch.nn.functional.cross_entropy(pred, label)
             loss.backward()
             optimizer.step()
             global_step += 1
