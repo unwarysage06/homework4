@@ -20,7 +20,7 @@ def train(
     lr: float = 1e-3,
     batch_size: int = 64,
     seed: int = 2024,
-    exp_dir: str = "logs"
+    exp_dir: str = "logs",
     **kwargs,
 ):
     if torch.cuda.is_available():
@@ -58,7 +58,7 @@ def train(
     # training loop
     for epoch in range(num_epoch):
         # clear metrics at beginning of epoch
-        for key in metrics:
+        for key,value  in metrics:
             metrics[key].clear()
 
         model.train()
@@ -112,11 +112,14 @@ def train(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--exp_dir", type=str, default="logs")
     parser.add_argument("--model_name", type=str, required=True)
+    parser.add_argument("--transformer_pipeline", type=str, default="state_only")
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--num_epoch", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=2024)
+    parser.add_argument("--exp_dir", type=str, default="logs")
 
     # optional: additional model hyperparamters
     # parser.add_argument("--num_layers", type=int, default=3)
