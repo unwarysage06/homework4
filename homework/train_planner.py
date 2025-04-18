@@ -13,7 +13,6 @@ from .utils import load_train_data, load_val_data
 
 
 def train(
-    exp_dir: str = "logs",
     model_name: str = "linear_planner",
     transformer_pipeline="state_only",
     num_workers: int = 2,
@@ -21,6 +20,7 @@ def train(
     lr: float = 1e-3,
     batch_size: int = 64,
     seed: int = 2024,
+    exp_dir: str = "logs"
     **kwargs,
 ):
     if torch.cuda.is_available():
