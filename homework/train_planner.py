@@ -14,7 +14,7 @@ from .utils import load_train_data, load_val_data
 
 def train(
     model_name: str = "linear_planner",
-    transformer_pipeline="state_only",
+    transform_pipeline="state_only",
     num_workers: int = 2,
     num_epoch: int = 50,
     lr: float = 1e-3,
@@ -23,6 +23,7 @@ def train(
     exp_dir: str = "logs",
     **kwargs,
 ):
+    num_workers = num_workers
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
@@ -45,7 +46,7 @@ def train(
     model = model.to(device)
     model.train()
 
-    train_data = load_data("drive_data/train", transform_pipeline=transformer_pipeline, shuffle=True, batch_size=batch_size, num_workers=2)
+    train_data = load_data("drive_data/train", transform_pipeline=transform_pipeline, shuffle=True, batch_size=batch_size, num_workers=2)
     val_data = load_data("drive_data/val", shuffle=False)
 
 
