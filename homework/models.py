@@ -141,51 +141,121 @@ class TransformerPlanner(nn.Module):
 
         return out
 
+class CNNPlanner(nn.Module):
+    class Block(nn.Module):
+        def __init__(self, in_channels, out_channels, stride):
+            super().__init__()
+            kernel_size = 3
+            padding = (kernel_size - 1) // 2
 
-class CNNPlanner(torch.nn.Module):
-    def __init__(
-        self,
-        n_waypoints: int = 3,
-    ):
+            self.c1 = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+            self.n1 = nn.GroupNorm(1, out_channels)
+            self.relu1 = nn.ReLU()
+
+            self.c2 = nn.Conv2d(out_channels, out_channels, kernel_size, stride=1, padding=padding)
+            self.n2 = nn.GroupNorm(1, out_channels)
+            self.relu2 = nn.ReLU()
+
+            self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride) if in_channels != out_channels else nn.Identity()
+
+        def forward(self, x0):
+            x = self.relu1(self.n1(self.c1(x0)))
+            x = self.relu2(self.n2(self.c2(x)))
+            return x + self.skip(x0)
+
+    def __init__(self, n_waypoints: int = 3):
         super().__init__()
 
         self.n_waypoints = n_waypoints
 
-        self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN), persistent=False)
-        self.register_buffer("input_std", torch.as_tensor(INPUT_STD), persistent=False)
+        self.register_buffer("input_mean", torch.tensor(INPUT_MEAN).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("input_std", torch.tensor(INPUT_STD).view(1, 3, 1, 1), persistent=False)
 
-        # Define a simple CNN
-        self.cnn = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=5, stride=2, padding=2),  # -> (b, 16, h/2, w/2)
+        channel_output = 64
+        n_blocks = 2
+
+        layers = [
+            nn.Conv2d(3, channel_output, kernel_size=11, stride=2, padding=5),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=5, stride=2, padding=2), # -> (b, 32, h/4, w/4)
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2), # -> (b, 64, h/8, w/8)
-            nn.ReLU(),
-            nn.GroupNorm((1, 1))  # output shape: (b, 64, 1, 1)
+        ]
+
+        c1 = channel_output
+        for _ in range(n_blocks):
+            c2 = c1 * 2
+            layers.append(self.Block(c1, c2, stride=2))
+            c1 = c2
+
+        self.backbone = nn.Sequential(*layers)
+
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(c1, n_waypoints * 2)
         )
 
-        # Fully connected layer to output n_waypoints * 2
-        self.fc = nn.Linear(64, self.n_waypoints * 2)
+    def forward(self, image: torch.Tensor, **kwargs) -> torch.Tensor:
+        x = (image - self.input_mean) / self.input_std
+        x = self.backbone(x)
+        x = self.head(x)
+        return x.view(image.size(0), self.n_waypoints, 2)
+
+class CNNPlanner(torch.nn.Module):
+    class Block(nn.Module):
+            def __init__(self, in_channels, out_channels, stride):
+                super().__init__()
+                kernel_size = 3
+                padding = (kernel_size - 1) // 2
+
+                self.c1 = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+                self.n1 = nn.GroupNorm(1, out_channels)
+                self.relu1 = nn.ReLU()
+
+                self.c2 = nn.Conv2d(out_channels, out_channels, kernel_size, stride=1, padding=padding)
+                self.n2 = nn.GroupNorm(1, out_channels)
+                self.relu2 = nn.ReLU()
+
+                self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride) if in_channels != out_channels else nn.Identity()
+
+            def forward(self, x0):
+                x = self.relu1(self.n1(self.c1(x0)))
+                x = self.relu2(self.n2(self.c2(x)))
+                return x + self.skip(x0)
+
+    def __init__(self, n_waypoints: int = 3):
+        super().__init__()
+
+        self.n_waypoints = n_waypoints
+
+        self.register_buffer("input_mean", torch.tensor(INPUT_MEAN).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("input_std", torch.tensor(INPUT_STD).view(1, 3, 1, 1), persistent=False)
+
+        channel_output = 64
+        n_blocks = 2
+
+        layers = [
+            nn.Conv2d(3, channel_output, kernel_size=11, stride=2, padding=5),
+            nn.ReLU(),
+        ]
+
+        c1 = channel_output
+        for _ in range(n_blocks):
+            c2 = c1 * 2
+            layers.append(self.Block(c1, c2, stride=2))
+            c1 = c2
+
+        self.backbone = nn.Sequential(*layers)
+
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(c1, n_waypoints * 2)
+        )
 
     def forward(self, image: torch.Tensor, **kwargs) -> torch.Tensor:
-        """
-        Args:
-            image (torch.FloatTensor): shape (b, 3, h, w) and vals in [0, 1]
-
-        Returns:
-            torch.FloatTensor: future waypoints with shape (b, n, 2)
-        """
-        x = image
-        x = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
-
-        x = self.cnn(x)              # shape: (b, 64, 1, 1)
-        x = x.view(x.size(0), -1)    # shape: (b, 64)
-        x = self.fc(x)               # shape: (b, n_waypoints * 2)
-        x = x.view(-1, self.n_waypoints, 2)  # shape: (b, n, 2)
-        return x
-
-        raise NotImplementedError
+        x = (image - self.input_mean) / self.input_std
+        x = self.backbone(x)
+        x = self.head(x)
+        return x.view(image.size(0), self.n_waypoints, 2)
 
 
 MODEL_FACTORY = {
@@ -249,3 +319,88 @@ def calculate_model_size_mb(model: torch.nn.Module) -> float:
     Naive way to estimate model size
     """
     return sum(p.numel() for p in model.parameters()) * 4 / 1024 / 1024
+
+
+
+# class Classifier(nn.Module):
+#     class Block(nn.Module):
+#         def __init__(self, in_channels, out_channels,stride):
+#             super().__init__()
+#             kernel_size = 3
+#             padding = (kernel_size - 1) // 2
+
+#             self.c1 = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+#             self.n1 = nn.GroupNorm(1, out_channels)
+#             self.c2 = nn.Conv2d(out_channels, out_channels, kernel_size, stride=1, padding=padding)
+#             self.n2 = nn.GroupNorm(1, out_channels)
+#             self.relu1 = nn.ReLU()
+#             self.relu2 = nn.ReLU()
+
+
+#             self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0) if in_channels != out_channels else torch.nn.Identity()
+
+#         def forward(self, x0):
+#             x = self.relu1(self.n1(self.c1(x0)))
+#             x = self.relu2(self.n2(self.c2(x)))
+#             return self.skip(x0) + x
+#     def __init__(
+#         self,
+#         channel_output: int = 64,
+#         n_blocks: int = 2,
+#     ):
+#         """
+#         A convolutional network for image classification.
+
+#         Args:
+#             in_channels: int, number of input channels
+#             num_classes: int
+#         """
+#         super().__init__()
+
+#         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
+#         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
+
+#         # TODO: implement
+#         layers = [  
+#             torch.nn.Conv2d(3, channel_output, kernel_size=11, stride=2, padding=5),
+#             torch.nn.ReLU(),
+#             ]
+        
+#         c1 = channel_output
+#         for i in range(n_blocks):
+#             c2 = c1 * 2
+#             layers.append(self.Block(c1, c2, stride=2))
+#             c1 = c2
+#         layers.append(torch.nn.Conv2d(c1, 6, kernel_size=1, stride=2, padding=0))
+#         self.model = torch.nn.Sequential(*layers)
+
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         Args:
+#             x: tensor (b, 3, h, w) image
+
+#         Returns:
+#             tensor (b, num_classes) logits
+#         """
+#         # optional: normalizes the input
+#         #z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
+
+#         # TODO: replace with actual forward pass
+#         logits = self.model(x).mean(dim=-1).mean(dim=-1)
+
+#         return logits
+
+#     def predict(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         Used for inference, returns class labels
+#         This is what the AccuracyMetric uses as input (this is what the grader will use!).
+#         You should not have to modify this function.
+
+#         Args:
+#             x (torch.FloatTensor): image with shape (b, 3, h, w) and vals in [0, 1]
+
+#         Returns:
+#             pred (torch.LongTensor): class labels {0, 1, ..., 5} with shape (b, h, w)
+#         """
+#         return self(x).argmax(dim=1)

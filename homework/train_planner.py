@@ -2,6 +2,8 @@
 import argparse
 from datetime import datetime
 from pathlib import Path
+from datetime import datetime
+
 
 import numpy as np
 import torch
@@ -9,11 +11,10 @@ import torch.utils.tensorboard as tb
 
 from .models import  MLPPlanner, TransformerPlanner, CNNPlanner, load_model, save_model
 from .datasets.road_dataset import load_data
-from .utils import load_train_data, load_val_data
 
 
 def train(
-    model_name: str = "linear_planner",
+    model_name: str = "mlp_planner",
     transform_pipeline="state_only",
     num_workers: int = 2,
     num_epoch: int = 50,
@@ -23,92 +24,84 @@ def train(
     exp_dir: str = "logs",
     **kwargs,
 ):
-    num_workers = num_workers
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        device = torch.device("mps")
-    else:
-        print("CUDA not available, using CPU")
-        device = torch.device("cpu")
-
-    # set random seed so each run is deterministic
+    # Setup
     torch.manual_seed(seed)
     np.random.seed(seed)
-
-    # directory with timestamp to save tensorboard logs and model checkpoints
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log_dir = Path(exp_dir) / f"{model_name}_{datetime.now().strftime('%m%d_%H%M%S')}"
     logger = tb.SummaryWriter(log_dir)
 
-
-    # note: the grader uses default kwargs, you'll have to bake them in for the final submission
-    model = load_model(model_name, **kwargs)
-    model = model.to(device)
+    # Load model
+    model = load_model(model_name, **kwargs).to(device)
     model.train()
 
-    train_data = load_data("drive_data/train", transform_pipeline=transform_pipeline, shuffle=True, batch_size=batch_size, num_workers=2)
-    val_data = load_data("drive_data/val", shuffle=False)
+    # Load datasets
+    train_loader = load_data("drive_data/train", transform_pipeline=transform_pipeline, shuffle=True, batch_size=batch_size, num_workers=num_workers)
+    val_loader = load_data("drive_data/val", transform_pipeline=transform_pipeline, shuffle=False, batch_size=batch_size, num_workers=0)
 
-
-    # create loss function and optimizer
-    # optimizer = ...
+    # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    loss_fn = torch.nn.MSELoss()
+
     global_step = 0
-    metrics = {"train_acc": [], "val_acc": []}
 
-    # training loop
     for epoch in range(num_epoch):
-        # clear metrics at beginning of epoch
-        for key,value  in metrics:
-            metrics[key].clear()
-
+        train_losses = []
         model.train()
-        for batch_idx, (img, label) in enumerate(train_data):  
-            img, label = img.to(device), label.to(device)
+        for batch in train_loader:
             optimizer.zero_grad()
-            pred = model(img)
-            optimizer.zero_grad()
-            loss = torch.nn.functional.cross_entropy(pred, label)
+
+            if model_name == "cnn_planner":
+                images = batch["image"].to(device)
+                targets = batch["waypoints"].to(device)
+                preds = model(image=images)
+            else:  # MLP or Transformer
+                track_left = batch["track_left"].to(device)
+                track_right = batch["track_right"].to(device)
+                targets = batch["waypoints"].to(device)
+                preds = model(track_left=track_left, track_right=track_right)
+
+            loss = loss_fn(preds, targets)
             loss.backward()
             optimizer.step()
+
+            train_losses.append(loss.item())
             global_step += 1
 
-            # Compute and store training accuracy
-            acc = (pred.argmax(dim=1) == label).float().mean()
-            metrics["train_acc"].append(acc)
-        epoch_train_acc = torch.as_tensor(metrics["train_acc"]).mean()
+        avg_train_loss = sum(train_losses) / len(train_losses)
 
-        # disable gradient computation and switch to evaluation mode
-        with torch.inference_mode():
-            model.eval()
+        # Validation
+        model.eval()
+        val_losses = []
+        with torch.no_grad():
+            for batch in val_loader:
+                if model_name == "cnn_planner":
+                    images = batch["image"].to(device)
+                    targets = batch["waypoints"].to(device)
+                    preds = model(image=images)
+                else:
+                    track_left = batch["track_left"].to(device)
+                    track_right = batch["track_right"].to(device)
+                    targets = batch["waypoints"].to(device)
+                    preds = model(track_left=track_left, track_right=track_right)
 
-            for img, label in val_data:
-                img, label = img.to(device), label.to(device)
+                val_loss = loss_fn(preds, targets)
+                val_losses.append(val_loss.item())
 
-                # TODO: compute validation accuracy
-                pred = model(img)
-                acc = (pred.argmax(dim=1) == label).float().mean()  
-                metrics["val_acc"].append(acc)
-        # log average train and val accuracy to tensorboard
-        epoch_val_acc = torch.as_tensor(metrics["val_acc"]).mean()
-        logger.add_scalar("train_accuracy", epoch_train_acc, global_step=global_step)
-        logger.add_scalar("val_accuracy", epoch_val_acc, global_step=global_step)
+        avg_val_loss = sum(val_losses) / len(val_losses)
+        logger.add_scalar("train_loss", avg_train_loss, global_step)
+        logger.add_scalar("val_loss", avg_val_loss, global_step)
 
-        # print on first, last, every 10th epoch
-        if epoch == 0 or epoch == num_epoch - 1 or (epoch + 1) % 10 == 0:
-            print(
-                f"Epoch {epoch + 1:2d} / {num_epoch:2d}: "
-                f"train_acc={epoch_train_acc:.4f} "
-                f"val_acc={epoch_val_acc:.4f}"
-            )
+        print(
+            f"Epoch {epoch+1:02d}/{num_epoch} "
+            f"Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}"
+        )
 
-    # save and overwrite the model in the root directory for grading
+    # Save models
     save_model(model)
-
-    # save a copy of model weights in the log directory
     torch.save(model.state_dict(), log_dir / f"{model_name}.th")
     print(f"Model saved to {log_dir / f'{model_name}.th'}")
-
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
